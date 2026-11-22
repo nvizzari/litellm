@@ -41331,7 +41331,7 @@
         "input_cost_per_second": 0.00021,
         "litellm_provider": "gradium",
         "metadata": {
-            "calculation": "TTS: 1 credit per character synthesized; $7 per 100k add-on credits (XS plan) = $0.00007/char. Larger plans are cheaper (down to $3.8/100k on L), and Pro Voice Clone voices bill 1.2 credits per character. STT: 3 credits per second of audio = $0.00021/s at the same rate.",
+            "calculation": "TTS: 1 credit per character synthesized; $7 per 100k add-on credits (XS plan) = $0.00007/char. Larger plans are cheaper (down to $3.8/100k on L), and Pro Voice Clone voices bill 1.2 credits per character. STT: 3 credits per started second of the stream Gradium processed (the audio plus the model look-ahead, as reported in its step messages) = $0.00021/s at the same rate.",
             "notes": "Gradium names its default TTS and STT models both `default`, so this entry prices both endpoints. Speech bills per character of input text, transcription per second of input audio."
         },
         "mode": "audio_speech",

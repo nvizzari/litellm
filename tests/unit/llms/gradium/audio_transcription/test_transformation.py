@@ -36,13 +36,21 @@ def _ndjson(*messages: dict[str, object]) -> httpx.Response:
     )
 
 
-_HELLO_WORLD: Final = _ndjson(
+_HELLO_WORLD_MESSAGES: Final = (
     {"type": "text", "text": "Hello", "start_s": 0.5, "stream_id": 0},
-    {"type": "step", "vad": [], "step_idx": 3},
     {"type": "end_text", "stop_s": 1.0, "stream_id": 0},
     {"type": "text", "text": " world.", "start_s": 1.2, "stream_id": 0},
     {"type": "end_text", "stop_s": 2.5, "stream_id": 0},
 )
+_HELLO_WORLD: Final = _ndjson(*_HELLO_WORLD_MESSAGES)
+
+
+def _processed(*total_durations_s: float) -> httpx.Response:
+    steps: Final[tuple[dict[str, object], ...]] = tuple(
+        {"type": "step", "vad": [], "step_idx": 0, "step_duration_s": 0.08, "total_duration_s": total}
+        for total in total_durations_s
+    )
+    return _ndjson(*steps, *_HELLO_WORLD_MESSAGES)
 
 
 @pytest.fixture
@@ -87,6 +95,29 @@ def test_asks_gradium_to_detect_the_language_when_the_caller_sets_none(gradium_e
         _transcribe()
 
         assert _json_config(route) == {"language": "any"}
+
+
+# The proxy hands multipart form fields over as strings, and Gradium silently ignores a setting
+# whose JSON type is wrong (delay_in_frames "16" falls back to its default), so they must be decoded.
+def test_decodes_settings_that_arrive_as_form_strings(gradium_env: None):
+    with respx.mock:
+        route: Final = respx.post(url__startswith=_URL).mock(return_value=_HELLO_WORLD)
+
+        _transcribe(
+            language="en",
+            temperature="0.2",
+            delay_in_frames="16",
+            keywords='{"words": ["LiteLLM"], "boost": 3}',
+            target_language="fr",
+        )
+
+        assert _json_config(route) == {
+            "language": "en",
+            "temp": 0.2,
+            "delay_in_frames": 16,
+            "keywords": {"words": ["LiteLLM"], "boost": 3},
+            "target_language": "fr",
+        }
 
 
 # Gradium tuning knobs (delay_in_frames, keywords, ...) only exist inside json_config.
@@ -189,8 +220,26 @@ def test_requires_an_api_key(gradium_env: None):
         litellm.transcription(model="gradium/default", file=("speech.wav", b"RIFF"), api_base=_API_BASE)
 
 
-# Gradium bills speech-to-text per second of submitted audio.
-def test_bills_the_audio_duration_at_the_per_second_rate(gradium_env: None, local_model_cost_map: None):
+# Gradium bills 3 credits per started second of the stream it processed, which runs past the end of
+# the file by the model's look-ahead (measured 2026-11-22: a 7.009 s WAV reported 12.08 s and cost 39 credits).
+# Raw PCM has no header to measure, so the reported duration is the only way to bill it at all.
+@pytest.mark.parametrize("file", [("speech.wav", _wav(seconds=2.0)), ("speech.pcm", b"\x00\x00" * _SAMPLE_RATE * 2)])
+def test_bills_the_processed_duration_gradium_reports_rounded_up(
+    gradium_env: None, local_model_cost_map: None, file: tuple[str, bytes]
+):
+    with respx.mock:
+        respx.post(url__startswith=_URL).mock(return_value=_processed(0.08, 5.04))
+
+        response: Final = _transcribe(file=file)
+
+        price_per_second: Final = litellm.model_cost["gradium/default"]["input_cost_per_second"]
+        assert price_per_second > 0
+        assert response._hidden_params["response_cost"] == pytest.approx(6 * price_per_second)
+
+
+def test_bills_the_file_duration_when_gradium_reports_no_processed_duration(
+    gradium_env: None, local_model_cost_map: None
+):
     with respx.mock:
         respx.post(url__startswith=_URL).mock(return_value=_HELLO_WORLD)
 

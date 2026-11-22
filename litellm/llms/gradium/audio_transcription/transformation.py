@@ -1,11 +1,12 @@
 import json
+import math
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
-from typing import Annotated, ClassVar, Final, Literal
+from typing import Annotated, ClassVar, Final, Literal, TypeAlias
 from urllib.parse import urlencode
 
 from httpx import Headers, Response
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 import litellm
 from litellm.litellm_core_utils.audio_utils.utils import process_audio_file
@@ -15,7 +16,7 @@ from litellm.llms.base_llm.audio_transcription.transformation import (
 )
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.types.llms.openai import AllMessageValues, OpenAIAudioTranscriptionOptionalParams
-from litellm.types.utils import FileTypes, TranscriptionResponse
+from litellm.types.utils import FileTypes, TranscriptionResponse, TranscriptionUsageDurationObject
 
 from ..common_utils import GradiumException, gradium_api_url, gradium_auth_headers
 
@@ -44,19 +45,42 @@ class _Error(BaseModel):
     message: str
 
 
+class _Step(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    type: Literal["step", "vad"]
+    total_duration_s: float
+
+
 class _Untyped(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     type: str
 
 
-_MESSAGE: Final[TypeAdapter[_Text | _EndText | _Error]] = TypeAdapter(
-    Annotated[_Text | _EndText | _Error, Field(discriminator="type")], config=ConfigDict(hide_input_in_errors=True)
+_Message: TypeAlias = _Text | _EndText | _Error | _Step
+_MESSAGE: Final[TypeAdapter[_Message]] = TypeAdapter(
+    Annotated[_Message, Field(discriminator="type")], config=ConfigDict(hide_input_in_errors=True)
 )
-_KNOWN_TYPES: Final = frozenset({"text", "end_text", "error"})
+_KNOWN_TYPES: Final = frozenset({"text", "end_text", "error", "step", "vad"})
+_FORM_VALUE: Final = TypeAdapter(object)
 
 
-def _messages(body: str) -> tuple[_Text | _EndText | _Error, ...]:
+def _form_decoded(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    try:
+        return _FORM_VALUE.validate_json(value)
+    except ValidationError:
+        return value
+
+
+def _billed_seconds(messages: Sequence[_Message]) -> int | None:
+    processed: Final = tuple(message.total_duration_s for message in messages if isinstance(message, _Step))
+    return math.ceil(processed[-1]) if processed else None
+
+
+def _messages(body: str) -> tuple[_Message, ...]:
     lines: Final = tuple(line for line in body.splitlines() if line.strip())
     return tuple(
         _MESSAGE.validate_json(line) for line in lines if _Untyped.model_validate_json(line).type in _KNOWN_TYPES
@@ -72,14 +96,14 @@ class _Segment(BaseModel):
     text: str
 
 
-def _segment_end(text: _Text, later: Sequence[_Text | _EndText | _Error]) -> float:
+def _segment_end(text: _Text, later: Sequence[_Message]) -> float:
     return next(
         (message.stop_s for message in later if isinstance(message, _EndText) and message.stream_id == text.stream_id),
         text.start_s,
     )
 
 
-def _segments(messages: Sequence[_Text | _EndText | _Error]) -> tuple[_Segment, ...]:
+def _segments(messages: Sequence[_Message]) -> tuple[_Segment, ...]:
     texts: Final = tuple(
         (index, message)
         for index, message in enumerate(messages)
@@ -133,14 +157,14 @@ class GradiumAudioTranscriptionConfig(BaseAudioTranscriptionConfig):
         language: Final = optional_params.get("language")
         temperature: Final = optional_params.get("temperature")
         provider_params: Final = {
-            key: value
+            key: _form_decoded(value)
             for key, value in optional_params.items()
             if value is not None and key not in self.NON_PROVIDER_PARAMS
         }
         return {
             **provider_params,
             "language": language if isinstance(language, str) and language else self.AUTO_DETECT_LANGUAGE,
-            **({"temp": temperature} if temperature is not None else {}),
+            **({"temp": _form_decoded(temperature)} if temperature is not None else {}),
         }
 
     def get_complete_url(
@@ -205,7 +229,13 @@ class GradiumAudioTranscriptionConfig(BaseAudioTranscriptionConfig):
             raise GradiumException(message=error.message, status_code=502, headers=raw_response.headers)
 
         segments: Final = _segments(messages)
+        billed_seconds: Final = _billed_seconds(messages)
         return TranscriptionResponse(
             text=" ".join(segment.text for segment in segments),
             segments=[segment.model_dump() for segment in segments],
+            usage=(
+                TranscriptionUsageDurationObject(type="duration", seconds=billed_seconds)
+                if billed_seconds is not None
+                else None
+            ),
         )
