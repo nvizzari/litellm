@@ -220,21 +220,25 @@ def test_requires_an_api_key(gradium_env: None):
         litellm.transcription(model="gradium/default", file=("speech.wav", b"RIFF"), api_base=_API_BASE)
 
 
-# Gradium bills 3 credits per started second of the stream it processed, which runs past the end of
-# the file by the model's look-ahead (measured 2026-11-22: a 7.009 s WAV reported 12.08 s and cost 39 credits).
-# Raw PCM has no header to measure, so the reported duration is the only way to bill it at all.
+# Gradium bills 3 credits per started second of the stream it processed, a little past the last total it reports,
+# and well past the end of the file. Each (reported total, charged seconds) pair below was read off Gradium's credit
+# balance on 2026-11-22. Raw PCM has no header to measure, so the reported total is the only way to bill it at all.
+@pytest.mark.parametrize(
+    ("last_total_s", "charged_s"),
+    [(5.92, 7), (6.08, 7), (6.72, 7), (6.8, 8), (7.7599998, 8), (7.84, 9), (12.08, 13)],
+)
 @pytest.mark.parametrize("file", [("speech.wav", _wav(seconds=2.0)), ("speech.pcm", b"\x00\x00" * _SAMPLE_RATE * 2)])
-def test_bills_the_processed_duration_gradium_reports_rounded_up(
-    gradium_env: None, local_model_cost_map: None, file: tuple[str, bytes]
+def test_bills_what_gradium_charges_for_the_processed_stream(
+    gradium_env: None, local_model_cost_map: None, file: tuple[str, bytes], last_total_s: float, charged_s: int
 ):
     with respx.mock:
-        respx.post(url__startswith=_URL).mock(return_value=_processed(0.08, 5.04))
+        respx.post(url__startswith=_URL).mock(return_value=_processed(0.08, last_total_s))
 
         response: Final = _transcribe(file=file)
 
         price_per_second: Final = litellm.model_cost["gradium/default"]["input_cost_per_second"]
         assert price_per_second > 0
-        assert response._hidden_params["response_cost"] == pytest.approx(6 * price_per_second)
+        assert response._hidden_params["response_cost"] == pytest.approx(charged_s * price_per_second)
 
 
 def test_bills_the_file_duration_when_gradium_reports_no_processed_duration(

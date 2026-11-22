@@ -75,9 +75,15 @@ def _form_decoded(value: object) -> object:
         return value
 
 
+# Gradium charges per started second of everything it processed, which runs about three 80 ms frames past the last
+# step it reports. Measured against its credit balance on 2026-11-22: the charge flips between totals 6.72/6.80 s and
+# 7.76/7.84 s, so the unreported tail is in (0.20, 0.24]. 0.22 keeps every frame-aligned total off a whole second.
+_UNREPORTED_TAIL_S: Final = 0.22
+
+
 def _billed_seconds(messages: Sequence[_Message]) -> int | None:
     processed: Final = tuple(message.total_duration_s for message in messages if isinstance(message, _Step))
-    return math.ceil(processed[-1]) if processed else None
+    return math.ceil(processed[-1] + _UNREPORTED_TAIL_S) if processed else None
 
 
 def _messages(body: str) -> tuple[_Message, ...]:
