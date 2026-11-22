@@ -13,7 +13,7 @@ from litellm.llms.base_llm.text_to_speech.transformation import (
     TextToSpeechRequestData,
 )
 
-from ..common_utils import GradiumException
+from ..common_utils import GradiumException, gradium_api_url, gradium_auth_headers
 
 if TYPE_CHECKING:
     from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
@@ -169,16 +169,9 @@ class GradiumTextToSpeechConfig(BaseTextToSpeechConfig):
         api_key: str | None = None,
         api_base: str | None = None,
     ) -> dict[str, str]:  # mutable-ok: signature fixed by BaseTextToSpeechConfig
-        if not api_key:
-            raise litellm.AuthenticationError(
-                message="Gradium API key is required. Set `api_key` on the model.",
-                llm_provider="gradium",
-                model=model,
-            )
-
         return {
             **headers,
-            "x-api-key": api_key,
+            **gradium_auth_headers(api_key, model),
             "Content-Type": "application/json",
         }
 
@@ -196,15 +189,7 @@ class GradiumTextToSpeechConfig(BaseTextToSpeechConfig):
         api_base: str | None,
         litellm_params: dict[str, object],  # mutable-ok: signature fixed by BaseTextToSpeechConfig
     ) -> str:
-        if not api_base:
-            raise litellm.APIConnectionError(
-                message="Gradium API base is required. Set `api_base` on the model, e.g. https://eu.api.gradium.ai.",
-                llm_provider="gradium",
-                model=model,
-            )
-
-        root: Final = api_base.rstrip("/").removesuffix("/api")
-        return f"{root}{self.TTS_ENDPOINT_PATH}"
+        return gradium_api_url(api_base, model, self.TTS_ENDPOINT_PATH)
 
     def transform_text_to_speech_request(
         self,

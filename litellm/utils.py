@@ -10837,6 +10837,12 @@ class ProviderConfigManager:
             )
 
             return ElevenLabsAudioTranscriptionConfig()
+        elif litellm.LlmProviders.GRADIUM == provider:
+            from litellm.llms.gradium.audio_transcription.transformation import (
+                GradiumAudioTranscriptionConfig,
+            )
+
+            return GradiumAudioTranscriptionConfig()
         elif litellm.LlmProviders.XAI == provider:
             from litellm.llms.xai.audio_transcription.transformation import XAIAudioTranscriptionConfig
 
